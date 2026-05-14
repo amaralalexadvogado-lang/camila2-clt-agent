@@ -103,11 +103,6 @@ async def run_followups_once():
             last_key='last_followup_at'; count_key='followup_count'
             msg=('Oi, passando para dar sequência ao seu atendimento do consignado CLT. '
                  'Para eu encaminhar sua análise, me envie por favor: nome completo, CPF, data de nascimento e e-mail.')
-        elif stage == 'ask_documents':
-            started=datetime.fromisoformat(s.get('ask_documents_at')) if s.get('ask_documents_at') else now
-            last_key='last_doc_followup_at'; count_key='doc_followup_count'
-            msg=('Oi, já recebi seus dados. Falta só o envio dos documentos/fotos para eu encaminhar ao time comercial. '
-                 'Pode mandar por aqui para seguirmos?')
         elif stage == 'proposal_sent':
             started=datetime.fromisoformat(s.get('proposal_sent_at')) if s.get('proposal_sent_at') else now
             last_key='last_proposal_followup_at'; count_key='proposal_followup_count'

@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request, BackgroundTasks
 from dotenv import load_dotenv
 from agent import process_message
 from storage import update_session, all_sessions
-from venditore import send_text, create_note
+from venditore import send_text, create_note, apply_handoff_labels
 from text_utils import within_business_hours, looks_like_proposal_sent
 
 load_dotenv()
@@ -71,9 +71,12 @@ async def handle_incoming(session_id: str, text: str):
     logger.info('Mensagem recebida %s: %s', session_id, text[:120])
     # Se cliente respondeu depois de proposta, parar follow-up automático.
     # A resposta vai para operador; a Camila só confirma intenção sem pedir dados novamente.
-    replies, note = process_message(session_id, text)
+    replies, note, operator_name = process_message(session_id, text)
     if note:
         create_note(session_id, note)
+    if operator_name:
+        label_results=apply_handoff_labels(session_id, operator_name)
+        update_session(session_id, {'handoff_labels_applied': label_results})
     for msg in [r for r in replies if r]:
         send_text(session_id, msg)
         await asyncio.sleep(0.8)

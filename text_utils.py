@@ -39,6 +39,11 @@ def is_status_question(text: str):
     keys=['deu certo','e aí','e ai','ta vendo','tá vendo','conseguiu','retorno','proposta','simulação','simulacao','demorando','novidade','alguma coisa']
     return any(k in t for k in keys)
 
+def is_memory_question(text: str):
+    t=(text or '').lower()
+    keys=['já nos falamos','ja nos falamos','já falamos','ja falamos','já te mandei','ja te mandei','mande algum dado','mandei algum dado','meus dados','algum dado','já passei','ja passei']
+    return any(k in t for k in keys)
+
 def asks_about_bank_app(text: str):
     t=(text or '').lower()
     return any(k in t for k in ['carteira digital','ctps digital','banco do brasil','caixa tem','meu banco','direto no banco','aplicativo do banco','app do banco'])

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from bank_rules import bank_card
-from text_utils import parse_tenure_months, has_required_personal_data, is_status_question, is_memory_question, asks_about_bank_app
+from text_utils import parse_tenure_months, missing_personal_fields, extract_personal_data_fields, is_memory_question, is_cancel_message, asks_about_bank_app
 from storage import get_session, update_session, next_round_robin_operator
 from sales_skill import OBJECTION_REPLIES
 
@@ -59,7 +59,7 @@ def process_message(session_id: str, text: str):
     # Retorno padrão: (mensagens_para_cliente, nota_interna, operador_para_etiquetas)
     # Depois que foi liberado para operador/digitação, a Camila fica em silêncio.
     # Só volta a falar se um operador enviar proposta e o cliente ficar sem responder (follow-up em main.py).
-    if stage in ('ready_for_operator','completed','operator_active','ineligible'):
+    if stage in ('ready_for_operator','completed','operator_active','ineligible','cancelled'):
         return [], None, None
     if stage == 'proposal_sent':
         update_session(session_id, {'stage':'operator_active','customer_replied_after_proposal_at':datetime.now(timezone.utc).isoformat()})
@@ -96,8 +96,22 @@ def process_message(session_id: str, text: str):
         return [ASK_DATA], card, None
 
     if stage == 'ask_data':
-        ok, missing=has_required_personal_data(text)
-        if not ok:
+        if is_cancel_message(text):
+            update_session(session_id, {'stage':'cancelled','cancelled_at':datetime.now(timezone.utc).isoformat()})
+            return [], 'LEAD CLT CANCELADO/SEM INTERESSE\nCliente informou que não precisa mais ou desistiu.', None
+
+        # Acumula dados enviados em mensagens separadas. Ex.: cliente manda primeiro CPF,
+        # depois nascimento, depois e-mail. A Camila só cobra o que ainda falta.
+        personal_data=dict(s.get('personal_data') or {})
+        new_fields=extract_personal_data_fields(text)
+        if new_fields:
+            personal_data.update(new_fields)
+        missing=missing_personal_fields(personal_data)
+        update_session(session_id, {
+            'personal_data': personal_data,
+            'last_personal_data_message_at': datetime.now(timezone.utc).isoformat()
+        })
+        if missing:
             extra=answer_question_if_needed(text)
             msg='Ainda preciso destes dados para seguir: ' + ', '.join(missing) + '. Pode me mandar, por favor?'
             return ([extra, msg] if extra else [msg]), None, None
@@ -107,6 +121,7 @@ def process_message(session_id: str, text: str):
             'personal_data_received': True,
             'personal_data_received_at':datetime.now(timezone.utc).isoformat(),
             'raw_personal_data':text,
+            'personal_data': personal_data,
             'ready_for_operator_at':datetime.now(timezone.utc).isoformat(),
             'assigned_operator': operator_name
         })

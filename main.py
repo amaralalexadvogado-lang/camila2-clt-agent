@@ -1,9 +1,9 @@
-import os, logging, asyncio
+import os, logging, asyncio, re
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, BackgroundTasks
 from dotenv import load_dotenv
 from agent import process_message
-from storage import update_session, all_sessions
+from storage import update_session, all_sessions, get_session
 from venditore import send_text, create_note, apply_handoff_labels
 from text_utils import within_business_hours, looks_like_proposal_sent
 
@@ -20,7 +20,34 @@ FOLLOWUP_INTERVAL_MINUTES=int(os.getenv('FOLLOWUP_INTERVAL_MINUTES','60'))
 @app.get('/')
 def root(): return {'ok': True, 'service':'camila2-clt'}
 @app.get('/health')
-def health(): return {'ok': True}
+def health():
+    db_path=os.getenv('SESSION_DB_PATH','sessions.json')
+    db_dir=os.path.dirname(db_path) or '.'
+    return {'ok': True, 'session_db_path': db_path, 'db_dir_exists': os.path.isdir(db_dir), 'db_dir_writable': os.access(db_dir, os.W_OK)}
+
+def _deep_get(obj, path):
+    cur=obj
+    for part in path.split('.'):
+        if not isinstance(cur, dict): return None
+        cur=cur.get(part)
+    return cur
+
+def _first_value(body: dict, paths):
+    for path in paths:
+        value=_deep_get(body, path)
+        if value not in (None, ''):
+            return str(value)
+    return ''
+
+def normalize_phone(value: str):
+    digits=re.sub(r'\D+', '', value or '')
+    if '@' in (value or '') and digits:
+        digits=digits.split('@')[0]
+    if len(digits) >= 10:
+        if not digits.startswith('55') and len(digits) in (10,11):
+            digits='55'+digits
+        return 'phone:'+digits
+    return ''
 
 def extract_message(body: dict):
     content=body.get('content') if isinstance(body.get('content'),dict) else {}
@@ -35,50 +62,76 @@ def extract_message(body: dict):
         m=body['message']; session_id=session_id or m.get('sessionId',''); text=m.get('text','') or m.get('caption','')
     if not text and isinstance(body.get('data'), dict):
         d=body['data']; session_id=session_id or d.get('sessionId',''); text=d.get('text','') or d.get('caption','')
+
+    # Memória robusta: a Venditore pode trocar o sessionId quando muda conexão/reabre conversa.
+    # Por isso, quando o webhook trouxer telefone/WhatsApp/JID, usamos phone:<número> como chave estável.
+    phone_raw=_first_value(body, [
+        'content.phone','content.phoneNumber','content.number','content.whatsapp','content.waId','content.remoteJid','content.from','content.chatId',
+        'content.contact.phone','content.contact.phoneNumber','content.contact.number','content.contact.waId','content.customer.phone','content.customer.number',
+        'message.from','message.remoteJid','message.chatId','data.phone','data.phoneNumber','data.number','data.waId','data.remoteJid','data.from','data.chatId',
+        'data.contact.phone','data.contact.phoneNumber','data.contact.number','contact.phone','contact.phoneNumber','contact.number',
+        'from','phone','phoneNumber','number','waId','remoteJid','chatId'
+    ])
+    memory_id=normalize_phone(phone_raw) or session_id
+
     if user_id:
-        return session_id, text, 'human_out'
+        return session_id, memory_id, text, 'human_out'
     if event and event not in ['MESSAGE_RECEIVED','MESSAGE.RECEIVED','NEW_MESSAGE','NEWMESSAGE']:
         if not text:
-            return session_id, '', 'ignore'
-    return session_id, text, 'in'
+            return session_id, memory_id, '', 'ignore'
+    return session_id, memory_id, text, 'in'
 
 @app.post('/webhook/venditore')
 async def webhook_venditore(request: Request, background_tasks: BackgroundTasks):
     body=await request.json()
-    session_id,text,kind=extract_message(body)
+    session_id,memory_id,text,kind=extract_message(body)
     if not session_id:
         return {'ok': True, 'ignored': 'no_session'}
     if kind == 'human_out':
-        background_tasks.add_task(handle_operator_message, session_id, text)
+        background_tasks.add_task(handle_operator_message, memory_id, session_id, text)
         return {'ok': True, 'operator': True}
     if kind!='in' or not text:
         return {'ok': True, 'ignored': kind}
-    background_tasks.add_task(handle_incoming, session_id, text)
+    background_tasks.add_task(handle_incoming, memory_id, session_id, text)
     return {'ok': True}
 
-async def handle_operator_message(session_id: str, text: str):
-    # Quando operador passa proposta, a Camila inicia follow-up comercial se cliente não responder.
-    if text and looks_like_proposal_sent(text):
-        update_session(session_id, {
+async def handle_operator_message(memory_id: str, venditore_session_id: str, text: str):
+    # Qualquer fala humana do operador assume o atendimento: a Camila para de responder.
+    # Exceção: se a fala parecer envio de valores/proposta, marcamos proposal_sent para follow-up automático se o cliente ficar em silêncio.
+    if not text:
+        return
+    if looks_like_proposal_sent(text):
+        update_session(memory_id, {
             'stage':'proposal_sent',
+            'venditore_session_id': venditore_session_id,
             'proposal_sent_at': datetime.now(timezone.utc).isoformat(),
             'last_proposal_followup_at': None,
             'proposal_followup_count': 0
         })
-        logger.info('Proposta detectada por operador na sessão %s', session_id)
+        logger.info('Proposta detectada por operador na sessão %s / memória %s', venditore_session_id, memory_id)
+        return
+    current_stage=(get_session(memory_id) or {}).get('stage')
+    if current_stage in ('ready_for_operator','ask_data','proposal_sent'):
+        update_session(memory_id, {
+            'stage':'operator_active',
+            'venditore_session_id': venditore_session_id,
+            'operator_active_at': datetime.now(timezone.utc).isoformat()
+        })
+        logger.info('Operador assumiu atendimento na sessão %s / memória %s', venditore_session_id, memory_id)
 
-async def handle_incoming(session_id: str, text: str):
-    logger.info('Mensagem recebida %s: %s', session_id, text[:120])
+async def handle_incoming(memory_id: str, venditore_session_id: str, text: str):
+    logger.info('Mensagem recebida sessão %s / memória %s: %s', venditore_session_id, memory_id, text[:120])
     # Se cliente respondeu depois de proposta, parar follow-up automático.
     # A resposta vai para operador; a Camila só confirma intenção sem pedir dados novamente.
-    replies, note, operator_name = process_message(session_id, text)
+    update_session(memory_id, {'venditore_session_id': venditore_session_id})
+    replies, note, operator_name = process_message(memory_id, text)
     if note:
-        create_note(session_id, note)
+        create_note(venditore_session_id, note)
     if operator_name:
-        label_results=apply_handoff_labels(session_id, operator_name)
-        update_session(session_id, {'handoff_labels_applied': label_results})
+        label_results=apply_handoff_labels(venditore_session_id, operator_name)
+        update_session(memory_id, {'handoff_labels_applied': label_results})
     for msg in [r for r in replies if r]:
-        send_text(session_id, msg)
+        send_text(venditore_session_id, msg)
         await asyncio.sleep(0.8)
 
 @app.on_event('startup')
@@ -120,7 +173,8 @@ async def run_followups_once():
         if last and now - datetime.fromisoformat(last) < timedelta(minutes=FOLLOWUP_INTERVAL_MINUTES):
             continue
         count=int(s.get(count_key) or 0) + 1
-        if send_text(session_id, msg):
+        send_session_id=s.get('venditore_session_id') or session_id
+        if send_text(send_session_id, msg):
             update_session(session_id, {last_key:now.isoformat(), count_key:count})
 
 @app.post('/admin/followups/run-once')

@@ -12,7 +12,10 @@ ASK_TENURE = 'Para eu ver os bancos certos para seu caso, preciso primeiro saber
 ASK_DATA = ('Perfeito! Agora preciso dessas informações para seguirmos:\n\n'
             'Nome completo:\nCPF:\nData de nascimento:\nE-mail:\n\n'
             'O e-mail é para caso a gente precise enviar o link para autorizar a consulta.')
-DATA_OK_OPERATOR = 'Obrigado pelo envio das informações. Seus dados estão protegidos pela LGPD. ✅'
+DATA_OK_OPERATOR = ('Obrigado pelo envio das informações. Seus dados estão protegidos pela LGPD. ✅\n\n'
+                    'Agora, as informações estão em posse do nosso time comercial que está vendo as possibilidades junto ao banco. '
+                    'Já voltamos com a resposta.\n\n'
+                    'Neste meio tempo, não tente simular em outros locais, sob pena de suspensão de 48h.')
 INELIGIBLE_TENURE = ('Infelizmente, pelo seu tempo de casa, não vai ser possível dar sequência agora. '
                      'Mas vamos deixar seu cadastro salvo em nosso sistema para contato futuro. '
                      'Tenha um ótimo dia e fique com Deus. 🙏')

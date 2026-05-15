@@ -2,7 +2,9 @@ import os, logging, requests
 logger=logging.getLogger(__name__)
 BASE=os.getenv('VENDITORE_BASE_URL','https://api.wts.chat').rstrip('/')
 TOKEN=os.getenv('VENDITORE_TOKEN','')
-ACCOUNT=os.getenv('VENDITORE_ACCOUNT_ID','')
+# Novo conector Venditore/WhatsApp da Camila 2. Pode ficar vazio se a API aceitar só Bearer token.
+CONNECTION_ID=os.getenv('VENDITORE_CONNECTION_ID','') or os.getenv('VENDITORE_ACCOUNT_ID','')
+ACCOUNT=CONNECTION_ID
 
 # Etiquetas exigidas pelo Alex no fim do fluxo CLT.
 # Se a API do Venditore da conta exigir ID em vez de nome, configure estes envs no Railway:

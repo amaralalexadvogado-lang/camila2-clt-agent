@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from agent import process_message
 from storage import update_session, all_sessions, get_session
 from venditore import send_text, create_note, apply_handoff_labels
-from text_utils import within_business_hours, looks_like_proposal_sent
+from text_utils import within_business_hours, looks_like_proposal_sent, missing_personal_fields
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +49,28 @@ def normalize_phone(value: str):
         return 'phone:'+digits
     return ''
 
+def _truthy(value):
+    if isinstance(value, bool): return value
+    return str(value).lower() in ('true','1','yes','sim','out','outgoing','sent','from_me')
+
+def _looks_like_operator_text(text: str):
+    t=(text or '').strip().lower()
+    operator_prefixes=('ryan:', 'vitória:', 'vitoria:', 'otávio:', 'otavio:', 'tatiane:', 'bianca:')
+    return t.startswith(operator_prefixes)
+
+def _looks_like_bot_text(text: str):
+    t=(text or '').lower()
+    bot_fragments=[
+        'sou a camila',
+        'quanto tempo você tem de carteira assinada',
+        'perfeito! agora preciso dessas informações',
+        'ainda preciso destes dados para seguir',
+        'obrigado pelo envio das informações. seus dados estão protegidos pela lgpd',
+        'passando para confirmar: o valor da proposta ainda está disponível',
+        'infelizmente, pelo seu tempo de casa'
+    ]
+    return any(f in t for f in bot_fragments)
+
 def extract_message(body: dict):
     content=body.get('content') if isinstance(body.get('content'),dict) else {}
     session_id=content.get('sessionId') or body.get('sessionId') or body.get('session_id') or ''
@@ -74,8 +96,20 @@ def extract_message(body: dict):
     ])
     memory_id=normalize_phone(phone_raw) or session_id
 
-    if user_id:
+    if user_id or _looks_like_operator_text(text):
         return session_id, memory_id, text, 'human_out'
+
+    outgoing_flag=_first_value(body, [
+        'content.fromMe','content.isFromMe','content.from_me','content.outgoing','content.direction','content.status',
+        'message.fromMe','message.isFromMe','message.from_me','message.outgoing','message.direction',
+        'data.fromMe','data.isFromMe','data.from_me','data.outgoing','data.direction',
+        'fromMe','isFromMe','from_me','outgoing','direction'
+    ])
+    if _truthy(outgoing_flag):
+        if _looks_like_bot_text(text):
+            return session_id, memory_id, text, 'ignore'
+        return session_id, memory_id, text, 'human_out'
+
     if event and event not in ['MESSAGE_RECEIVED','MESSAGE.RECEIVED','NEW_MESSAGE','NEWMESSAGE']:
         if not text:
             return session_id, memory_id, '', 'ignore'
@@ -157,8 +191,10 @@ async def run_followups_once():
         if stage == 'ask_data':
             started=datetime.fromisoformat(s.get('ask_data_at')) if s.get('ask_data_at') else now
             last_key='last_followup_at'; count_key='followup_count'
-            msg=('Oi, passando para dar sequência ao seu atendimento do consignado CLT. '
-                 'Para eu encaminhar sua análise, me envie por favor: nome completo, CPF, data de nascimento e e-mail.')
+            missing=missing_personal_fields(s.get('personal_data') or {})
+            if not missing:
+                continue
+            msg='Oi, passando para dar sequência ao seu atendimento do consignado CLT. Ainda preciso destes dados para seguir: ' + ', '.join(missing) + '. Pode me mandar, por favor?'
         elif stage == 'proposal_sent':
             started=datetime.fromisoformat(s.get('proposal_sent_at')) if s.get('proposal_sent_at') else now
             last_key='last_proposal_followup_at'; count_key='proposal_followup_count'

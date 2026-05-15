@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from bank_rules import bank_card
-from text_utils import parse_tenure_months, has_required_personal_data, is_status_question, asks_about_bank_app
+from text_utils import parse_tenure_months, has_required_personal_data, is_status_question, is_memory_question, asks_about_bank_app
 from storage import get_session, update_session, next_round_robin_operator
 from sales_skill import OBJECTION_REPLIES
 
@@ -12,9 +12,10 @@ ASK_TENURE = 'Para eu ver os bancos certos para seu caso, preciso primeiro saber
 ASK_DATA = ('Perfeito! Agora preciso dessas informações para seguirmos:\n\n'
             'Nome completo:\nCPF:\nData de nascimento:\nE-mail:\n\n'
             'O e-mail é para caso a gente precise enviar o link para autorizar a consulta.')
-DATA_OK_OPERATOR = ('Obrigado pelo envio das informações. Seus dados estão protegidos pela LGPD. ✅\n\n'
-                    'Agora já encaminhei seu atendimento para o nosso time comercial fazer a digitação e verificar as propostas disponíveis para você.\n\n'
-                    'Importante: neste meio tempo, não tente simular em outros lugares para não travar seu CPF por até 48h. Aguarde nosso retorno.')
+DATA_OK_OPERATOR = 'Obrigado pelo envio das informações. Seus dados estão protegidos pela LGPD. ✅'
+INELIGIBLE_TENURE = ('Infelizmente, pelo seu tempo de casa, não vai ser possível dar sequência agora. '
+                     'Mas vamos deixar seu cadastro salvo em nosso sistema para contato futuro. '
+                     'Tenha um ótimo dia e fique com Deus. 🙏')
 STATUS_HOLD = ('Estamos acompanhando por aqui. O sistema dos bancos está com instabilidade e por isso está demorando um pouco mais do que o esperado, '
                'mas seu caso já está com a gente e vamos te dar retorno assim que liberar a análise.')
 BANK_APP_REPLY = OBJECTION_REPLIES['carteira_digital']
@@ -53,11 +54,13 @@ def process_message(session_id: str, text: str):
     text=text or ''
 
     # Retorno padrão: (mensagens_para_cliente, nota_interna, operador_para_etiquetas)
-    # Memória anti-alucinação: se já está pronto/aguardando/proposta, não pedir dados de novo.
-    if stage in ('ready_for_operator','completed') and is_status_question(text):
-        return [STATUS_HOLD], None, None
+    # Depois que foi liberado para operador/digitação, a Camila fica em silêncio.
+    # Só volta a falar se um operador enviar proposta e o cliente ficar sem responder (follow-up em main.py).
+    if stage in ('ready_for_operator','completed','operator_active','ineligible'):
+        return [], None, None
     if stage == 'proposal_sent':
-        return ['Perfeito. A proposta está disponível para seguirmos. Quer que eu peça para o time comercial dar continuidade agora?'], None, None
+        update_session(session_id, {'stage':'operator_active','customer_replied_after_proposal_at':datetime.now(timezone.utc).isoformat()})
+        return [], None, None
 
     if stage in ('new','ask_tenure'):
         tenure=parse_tenure_months(text)
@@ -65,11 +68,23 @@ def process_message(session_id: str, text: str):
             extra=answer_question_if_needed(text)
             update_session(session_id, {'stage':'ask_tenure', 'first_seen_at':s.get('first_seen_at') or datetime.now(timezone.utc).isoformat()})
             if stage == 'new':
+                if is_memory_question(text):
+                    return ['Eu conferi por aqui e ainda não localizei seus dados completos neste atendimento. Para eu não te passar informação errada, me confirma primeiro: quanto tempo você tem de carteira assinada nessa empresa?'], None, None
                 return [INTRO], None, None
             if extra:
                 return [extra, ASK_TENURE], None, None
+            if is_memory_question(text):
+                return ['Eu conferi por aqui e ainda não localizei seus dados completos neste atendimento. Para eu não te passar informação errada, me confirma primeiro: quanto tempo você tem de carteira assinada nessa empresa?'], None, None
             return [ASK_TENURE], None, None
         card=bank_card(tenure)
+        if tenure < 3:
+            update_session(session_id, {
+                'stage':'ineligible',
+                'tenure_months':tenure,
+                'ineligible_reason':'tenure_less_than_3_months',
+                'ineligible_at':datetime.now(timezone.utc).isoformat()
+            })
+            return [INELIGIBLE_TENURE], 'LEAD CLT SEM SEQUÊNCIA AGORA\nMotivo: tempo de casa inferior a 3 meses\nSalvar para contato futuro.', None
         update_session(session_id, {
             'stage':'ask_data','tenure_months':tenure,'bank_card':card,
             'ask_data_at':datetime.now(timezone.utc).isoformat(),'followup_count':0,

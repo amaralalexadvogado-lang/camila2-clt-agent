@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from bank_rules import bank_card
 from text_utils import parse_tenure_months, has_required_personal_data, is_status_question, asks_about_bank_app
-from storage import get_session, update_session
+from storage import get_session, update_session, next_round_robin_operator
 from sales_skill import OBJECTION_REPLIES
 
 INTRO = ('Olá! 😊 Sou a Camila, assistente da Crédito Já, correspondente bancária especializada em empréstimo para o trabalhador.\n\n'
@@ -34,10 +34,12 @@ def answer_question_if_needed(text):
         if any(k in t for k in keys): return ans
     return None
 
-def operator_release_note(session_id: str):
+def operator_release_note(session_id: str, operator_name: str):
     s=get_session(session_id)
     return '\n'.join([
         'LEAD CLT PRONTO PARA DIGITAÇÃO',
+        'Etiquetas obrigatórias: digitar proposta; ' + operator_name,
+        'Operador responsável pelo rodízio: ' + operator_name,
         f"Vínculo: {s.get('tenure_months')} meses",
         'Dados pessoais: recebidos e confirmados',
         'Documentos: NÃO SOLICITAR NESTA ETAPA',
@@ -50,11 +52,12 @@ def process_message(session_id: str, text: str):
     stage=s.get('stage','new')
     text=text or ''
 
+    # Retorno padrão: (mensagens_para_cliente, nota_interna, operador_para_etiquetas)
     # Memória anti-alucinação: se já está pronto/aguardando/proposta, não pedir dados de novo.
     if stage in ('ready_for_operator','completed') and is_status_question(text):
-        return [STATUS_HOLD], None
+        return [STATUS_HOLD], None, None
     if stage == 'proposal_sent':
-        return ['Perfeito. A proposta está disponível para seguirmos. Quer que eu peça para o time comercial dar continuidade agora?'], None
+        return ['Perfeito. A proposta está disponível para seguirmos. Quer que eu peça para o time comercial dar continuidade agora?'], None, None
 
     if stage in ('new','ask_tenure'):
         tenure=parse_tenure_months(text)
@@ -62,34 +65,36 @@ def process_message(session_id: str, text: str):
             extra=answer_question_if_needed(text)
             update_session(session_id, {'stage':'ask_tenure', 'first_seen_at':s.get('first_seen_at') or datetime.now(timezone.utc).isoformat()})
             if stage == 'new':
-                return [INTRO], None
+                return [INTRO], None, None
             if extra:
-                return [extra, ASK_TENURE], None
-            return [ASK_TENURE], None
+                return [extra, ASK_TENURE], None, None
+            return [ASK_TENURE], None, None
         card=bank_card(tenure)
         update_session(session_id, {
             'stage':'ask_data','tenure_months':tenure,'bank_card':card,
             'ask_data_at':datetime.now(timezone.utc).isoformat(),'followup_count':0,
             'personal_data_received': False
         })
-        return [ASK_DATA], card
+        return [ASK_DATA], card, None
 
     if stage == 'ask_data':
         ok, missing=has_required_personal_data(text)
         if not ok:
             extra=answer_question_if_needed(text)
             msg='Ainda preciso destes dados para seguir: ' + ', '.join(missing) + '. Pode me mandar, por favor?'
-            return ([extra, msg] if extra else [msg]), None
+            return ([extra, msg] if extra else [msg]), None, None
+        operator_name=next_round_robin_operator()
         update_session(session_id, {
             'stage':'ready_for_operator',
             'personal_data_received': True,
             'personal_data_received_at':datetime.now(timezone.utc).isoformat(),
             'raw_personal_data':text,
-            'ready_for_operator_at':datetime.now(timezone.utc).isoformat()
+            'ready_for_operator_at':datetime.now(timezone.utc).isoformat(),
+            'assigned_operator': operator_name
         })
-        return [DATA_OK_OPERATOR], operator_release_note(session_id)
+        return [DATA_OK_OPERATOR], operator_release_note(session_id, operator_name), operator_name
 
     if stage == 'ready_for_operator':
-        return [STATUS_HOLD], None
+        return [STATUS_HOLD], None, None
 
-    return [ASK_TENURE], None
+    return [ASK_TENURE], None, None
